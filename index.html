@@ -1,18 +1,24 @@
 <!DOCTYPE html>
-
 <html>
-<body style="margin:0;background:black;color:white;text-align:center;">
+<body style="margin:0;background:black;color:white;text-align:center;font-family:Arial,sans-serif;">
 
 <h1>Moving Dot Counter</h1>
-<button onclick="startCamera()">Start Camera</button>
+<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-bottom:12px;">
+  <button onclick="startCamera()">Start Camera</button>
+  <button onclick="flipCamera()">Flip Camera</button>
+</div>
 
-<video id="video" autoplay playsinline style="width:100%"></video> <canvas id="canvas" style="display:none"></canvas>
+<video id="video" autoplay playsinline style="width:100%;max-width:900px;background:#111;"></video>
+<canvas id="canvas" style="display:none"></canvas>
 
 <h2 id="count">Count: 0</h2>
 
 <script>
 let video, canvas;
 let prevFrame = null;
+let currentFacingMode = "environment";
+let currentStream = null;
+let running = false;
 
 window.onload = () => {
   video = document.getElementById("video");
@@ -20,20 +26,52 @@ window.onload = () => {
 };
 
 async function startCamera() {
-  const stream = await navigator.mediaDevices.getUserMedia({
-  video: { facingMode: { exact: "environment" } }
-});
-  video.srcObject = stream;
-  loop();
+  await openCamera(currentFacingMode);
+}
+
+async function flipCamera() {
+  currentFacingMode = currentFacingMode === "environment" ? "user" : "environment";
+  await openCamera(currentFacingMode);
+}
+
+async function openCamera(facingMode) {
+  try {
+    stopCamera();
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: facingMode } },
+      audio: false
+    });
+
+    currentStream = stream;
+    video.srcObject = stream;
+    prevFrame = null;
+
+    await video.play();
+    running = true;
+    loop();
+  } catch (error) {
+    console.error(error);
+    alert("Could not access that camera. Try again or check permissions.");
+  }
+}
+
+function stopCamera() {
+  running = false;
+  if (currentStream) {
+    currentStream.getTracks().forEach(track => track.stop());
+    currentStream = null;
+  }
 }
 
 function loop() {
+  if (!running) return;
   processFrame();
   requestAnimationFrame(loop);
 }
 
 function processFrame() {
-  if (!video.videoWidth) return;
+  if (!video || !canvas || !video.videoWidth) return;
 
   const w = video.videoWidth;
   const h = video.videoHeight;
@@ -42,10 +80,9 @@ function processFrame() {
   canvas.height = h;
 
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
-
   ctx.drawImage(video, 0, 0, w, h);
-  const frame = ctx.getImageData(0, 0, w, h);
 
+  const frame = ctx.getImageData(0, 0, w, h);
   const count = countMovingDots(frame);
   document.getElementById("count").innerText = "Count: " + count;
 }
@@ -55,7 +92,7 @@ function countMovingDots(imageData) {
   const gray = new Uint8ClampedArray(width * height);
 
   for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-    gray[p] = (data[i] + data[i+1] + data[i+2]) / 3;
+    gray[p] = (data[i] + data[i + 1] + data[i + 2]) / 3;
   }
 
   if (!prevFrame) {
@@ -74,28 +111,30 @@ function countMovingDots(imageData) {
   const visited = new Uint8Array(width * height);
   let blobs = 0;
 
-  for (let y = 1; y < height-1; y++) {
-    for (let x = 1; x < width-1; x++) {
-      let idx = y*width + x;
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const idx = y * width + x;
       if (!motion[idx] || visited[idx]) continue;
 
-      let stack = [[x,y]];
+      const stack = [[x, y]];
       visited[idx] = 1;
       let area = 0;
 
       while (stack.length) {
-        let [cx, cy] = stack.pop();
+        const [cx, cy] = stack.pop();
         area++;
 
-        for (let dx=-1; dx<=1; dx++) {
-          for (let dy=-1; dy<=1; dy++) {
-            let nx = cx+dx;
-            let ny = cy+dy;
-            let nidx = ny*width + nx;
+        for (let dx = -1; dx <= 1; dx++) {
+          for (let dy = -1; dy <= 1; dy++) {
+            const nx = cx + dx;
+            const ny = cy + dy;
 
+            if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+
+            const nidx = ny * width + nx;
             if (!visited[nidx] && motion[nidx]) {
-              visited[nidx]=1;
-              stack.push([nx,ny]);
+              visited[nidx] = 1;
+              stack.push([nx, ny]);
             }
           }
         }
