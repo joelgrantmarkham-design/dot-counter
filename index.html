@@ -12,13 +12,20 @@
 <canvas id="canvas" style="display:none"></canvas>
 
 <h2 id="count">Count: 0</h2>
+<p style="opacity:.8;padding:0 16px;">This version is steadier: it smooths the result across frames and ignores tiny noisy blobs.</p>
 
 <script>
 let video, canvas;
-let prevFrame = null;
 let currentFacingMode = "environment";
 let currentStream = null;
 let running = false;
+let smoothedCounts = [];
+let displayedCount = 0;
+
+const DIFF_THRESHOLD = 40;
+const MIN_AREA = 80;
+const MAX_AREA = 6000;
+const STEP = 2; // sample every 2 pixels for speed + less noise
 
 window.onload = () => {
   video = document.getElementById("video");
@@ -39,13 +46,18 @@ async function openCamera(facingMode) {
     stopCamera();
 
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: facingMode } },
+      video: {
+        facingMode: { ideal: facingMode },
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
+      },
       audio: false
     });
 
     currentStream = stream;
     video.srcObject = stream;
-    prevFrame = null;
+    smoothedCounts = [];
+    displayedCount = 0;
 
     await video.play();
     running = true;
@@ -83,56 +95,100 @@ function processFrame() {
   ctx.drawImage(video, 0, 0, w, h);
 
   const frame = ctx.getImageData(0, 0, w, h);
-  const count = countMovingDots(frame);
-  document.getElementById("count").innerText = "Count: " + count;
+  const rawCount = countDotsFromSingleFrame(frame);
+  const stableCount = smoothCount(rawCount);
+
+  document.getElementById("count").innerText = `Count: ${stableCount}`;
 }
 
-function countMovingDots(imageData) {
+function smoothCount(value) {
+  smoothedCounts.push(value);
+  if (smoothedCounts.length > 7) smoothedCounts.shift();
+
+  const sorted = [...smoothedCounts].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+
+  // ease the displayed number so it doesn't jump around
+  if (Math.abs(median - displayedCount) >= 2) {
+    displayedCount = median;
+  } else {
+    displayedCount = Math.round((displayedCount * 3 + median) / 4);
+  }
+
+  return displayedCount;
+}
+
+function countDotsFromSingleFrame(imageData) {
   const { data, width, height } = imageData;
-  const gray = new Uint8ClampedArray(width * height);
+  const smallW = Math.floor(width / STEP);
+  const smallH = Math.floor(height / STEP);
+  const gray = new Uint8ClampedArray(smallW * smallH);
 
-  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-    gray[p] = (data[i] + data[i + 1] + data[i + 2]) / 3;
+  // grayscale + rough brightness stats
+  let sum = 0;
+  for (let y = 0; y < smallH; y++) {
+    for (let x = 0; x < smallW; x++) {
+      const srcX = x * STEP;
+      const srcY = y * STEP;
+      const i = (srcY * width + srcX) * 4;
+      const g = Math.round((data[i] + data[i + 1] + data[i + 2]) / 3);
+      const idx = y * smallW + x;
+      gray[idx] = g;
+      sum += g;
+    }
   }
 
-  if (!prevFrame) {
-    prevFrame = gray;
-    return 0;
-  }
+  const avg = sum / gray.length;
+  const binary = new Uint8Array(gray.length);
 
-  const motion = new Uint8Array(width * height);
-
+  // assume dots are brighter than background on a screen
+  const threshold = Math.min(245, avg + DIFF_THRESHOLD);
   for (let i = 0; i < gray.length; i++) {
-    motion[i] = Math.abs(gray[i] - prevFrame[i]) > 25 ? 1 : 0;
+    binary[i] = gray[i] >= threshold ? 1 : 0;
   }
 
-  prevFrame = gray;
+  // denoise with simple neighborhood majority
+  const clean = new Uint8Array(binary.length);
+  for (let y = 1; y < smallH - 1; y++) {
+    for (let x = 1; x < smallW - 1; x++) {
+      let s = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          s += binary[(y + dy) * smallW + (x + dx)];
+        }
+      }
+      clean[y * smallW + x] = s >= 5 ? 1 : 0;
+    }
+  }
 
-  const visited = new Uint8Array(width * height);
+  const visited = new Uint8Array(clean.length);
   let blobs = 0;
 
-  for (let y = 1; y < height - 1; y++) {
-    for (let x = 1; x < width - 1; x++) {
-      const idx = y * width + x;
-      if (!motion[idx] || visited[idx]) continue;
+  for (let y = 1; y < smallH - 1; y++) {
+    for (let x = 1; x < smallW - 1; x++) {
+      const idx = y * smallW + x;
+      if (!clean[idx] || visited[idx]) continue;
 
       const stack = [[x, y]];
       visited[idx] = 1;
       let area = 0;
+      let minX = x, maxX = x, minY = y, maxY = y;
 
       while (stack.length) {
         const [cx, cy] = stack.pop();
         area++;
+        if (cx < minX) minX = cx;
+        if (cx > maxX) maxX = cx;
+        if (cy < minY) minY = cy;
+        if (cy > maxY) maxY = cy;
 
         for (let dx = -1; dx <= 1; dx++) {
           for (let dy = -1; dy <= 1; dy++) {
             const nx = cx + dx;
             const ny = cy + dy;
-
-            if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
-
-            const nidx = ny * width + nx;
-            if (!visited[nidx] && motion[nidx]) {
+            if (nx < 0 || ny < 0 || nx >= smallW || ny >= smallH) continue;
+            const nidx = ny * smallW + nx;
+            if (!visited[nidx] && clean[nidx]) {
               visited[nidx] = 1;
               stack.push([nx, ny]);
             }
@@ -140,7 +196,19 @@ function countMovingDots(imageData) {
         }
       }
 
-      if (area > 20 && area < 2000) blobs++;
+      const boxW = maxX - minX + 1;
+      const boxH = maxY - minY + 1;
+      const aspect = boxW / Math.max(boxH, 1);
+      const scaledArea = area * STEP * STEP;
+
+      if (
+        scaledArea >= MIN_AREA &&
+        scaledArea <= MAX_AREA &&
+        aspect > 0.4 &&
+        aspect < 2.5
+      ) {
+        blobs++;
+      }
     }
   }
 
