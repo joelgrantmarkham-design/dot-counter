@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+
+<html>
+<body style="margin:0;background:black;color:white;text-align:center;">
+
+<h1>Moving Dot Counter</h1>
+<button onclick="startCamera()">Start Camera</button>
+
+<video id="video" autoplay playsinline style="width:100%"></video> <canvas id="canvas" style="display:none"></canvas>
+
+<h2 id="count">Count: 0</h2>
+
+<script>
+let video, canvas;
+let prevFrame = null;
+
+window.onload = () => {
+  video = document.getElementById("video");
+  canvas = document.getElementById("canvas");
+};
+
+async function startCamera() {
+  const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+  video.srcObject = stream;
+  loop();
+}
+
+function loop() {
+  processFrame();
+  requestAnimationFrame(loop);
+}
+
+function processFrame() {
+  if (!video.videoWidth) return;
+
+  const w = video.videoWidth;
+  const h = video.videoHeight;
+
+  canvas.width = w;
+  canvas.height = h;
+
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+  ctx.drawImage(video, 0, 0, w, h);
+  const frame = ctx.getImageData(0, 0, w, h);
+
+  const count = countMovingDots(frame);
+  document.getElementById("count").innerText = "Count: " + count;
+}
+
+function countMovingDots(imageData) {
+  const { data, width, height } = imageData;
+  const gray = new Uint8ClampedArray(width * height);
+
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+    gray[p] = (data[i] + data[i+1] + data[i+2]) / 3;
+  }
+
+  if (!prevFrame) {
+    prevFrame = gray;
+    return 0;
+  }
+
+  const motion = new Uint8Array(width * height);
+
+  for (let i = 0; i < gray.length; i++) {
+    motion[i] = Math.abs(gray[i] - prevFrame[i]) > 25 ? 1 : 0;
+  }
+
+  prevFrame = gray;
+
+  const visited = new Uint8Array(width * height);
+  let blobs = 0;
+
+  for (let y = 1; y < height-1; y++) {
+    for (let x = 1; x < width-1; x++) {
+      let idx = y*width + x;
+      if (!motion[idx] || visited[idx]) continue;
+
+      let stack = [[x,y]];
+      visited[idx] = 1;
+      let area = 0;
+
+      while (stack.length) {
+        let [cx, cy] = stack.pop();
+        area++;
+
+        for (let dx=-1; dx<=1; dx++) {
+          for (let dy=-1; dy<=1; dy++) {
+            let nx = cx+dx;
+            let ny = cy+dy;
+            let nidx = ny*width + nx;
+
+            if (!visited[nidx] && motion[nidx]) {
+              visited[nidx]=1;
+              stack.push([nx,ny]);
+            }
+          }
+        }
+      }
+
+      if (area > 20 && area < 2000) blobs++;
+    }
+  }
+
+  return blobs;
+}
+</script>
+
+</body>
+</html>
