@@ -20,7 +20,9 @@ window.onload = () => {
 };
 
 async function startCamera() {
-  const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+  const stream = await navigator.mediaDevices.getUserMedia({
+  video: { facingMode: { exact: "environment" } }
+});
   video.srcObject = stream;
   loop();
 }
