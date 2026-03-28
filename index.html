@@ -2,34 +2,37 @@
 <html>
 <body style="margin:0;background:black;color:white;text-align:center;font-family:Arial,sans-serif;">
 
-<h1>Moving Dot Counter</h1>
-<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-bottom:12px;">
+<h1>Fast Dot Counter</h1>
+<div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin:12px;">
   <button onclick="startCamera()">Start Camera</button>
   <button onclick="flipCamera()">Flip Camera</button>
+  <button onclick="toggleFreeze()" id="freezeBtn">Freeze</button>
 </div>
 
 <video id="video" autoplay playsinline style="width:100%;max-width:900px;background:#111;"></video>
 <canvas id="canvas" style="display:none"></canvas>
+<canvas id="overlay" style="position:absolute;left:50%;transform:translateX(-50%);top:110px;width:100%;max-width:900px;pointer-events:none;"></canvas>
 
-<h2 id="count">Count: 0</h2>
-<p style="opacity:.8;padding:0 16px;">This version is steadier: it smooths the result across frames and ignores tiny noisy blobs.</p>
+<h2 id="count" style="font-size:56px;margin:16px 0 8px;">Count: 0</h2>
+<p style="opacity:.8;padding:0 16px;max-width:900px;margin:0 auto 18px;">Use this for speed: point at the question screen, keep the dots inside the center box, then tap <b>Freeze</b> to lock the number.</p>
 
 <script>
-let video, canvas;
+let video, canvas, overlay;
 let currentFacingMode = "environment";
 let currentStream = null;
 let running = false;
-let smoothedCounts = [];
+let frozen = false;
 let displayedCount = 0;
 
-const DIFF_THRESHOLD = 40;
-const MIN_AREA = 80;
-const MAX_AREA = 6000;
-const STEP = 2; // sample every 2 pixels for speed + less noise
+const BRIGHT_OFFSET = 55;
+const MIN_AREA = 60;
+const MAX_AREA = 5000;
+const STEP = 2;
 
 window.onload = () => {
   video = document.getElementById("video");
   canvas = document.getElementById("canvas");
+  overlay = document.getElementById("overlay");
 };
 
 async function startCamera() {
@@ -39,6 +42,11 @@ async function startCamera() {
 async function flipCamera() {
   currentFacingMode = currentFacingMode === "environment" ? "user" : "environment";
   await openCamera(currentFacingMode);
+}
+
+function toggleFreeze() {
+  frozen = !frozen;
+  document.getElementById("freezeBtn").innerText = frozen ? "Resume" : "Freeze";
 }
 
 async function openCamera(facingMode) {
@@ -56,8 +64,9 @@ async function openCamera(facingMode) {
 
     currentStream = stream;
     video.srcObject = stream;
-    smoothedCounts = [];
     displayedCount = 0;
+    frozen = false;
+    document.getElementById("freezeBtn").innerText = "Freeze";
 
     await video.play();
     running = true;
@@ -78,53 +87,67 @@ function stopCamera() {
 
 function loop() {
   if (!running) return;
-  processFrame();
+  if (!frozen) processFrame();
   requestAnimationFrame(loop);
 }
 
 function processFrame() {
-  if (!video || !canvas || !video.videoWidth) return;
+  if (!video || !canvas || !overlay || !video.videoWidth) return;
 
   const w = video.videoWidth;
   const h = video.videoHeight;
 
   canvas.width = w;
   canvas.height = h;
+  overlay.width = w;
+  overlay.height = h;
 
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const octx = overlay.getContext("2d");
   ctx.drawImage(video, 0, 0, w, h);
 
-  const frame = ctx.getImageData(0, 0, w, h);
-  const rawCount = countDotsFromSingleFrame(frame);
-  const stableCount = smoothCount(rawCount);
+  // Center scan box for faster, steadier counting
+  const roi = {
+    x: Math.floor(w * 0.18),
+    y: Math.floor(h * 0.18),
+    width: Math.floor(w * 0.64),
+    height: Math.floor(h * 0.64)
+  };
 
-  document.getElementById("count").innerText = `Count: ${stableCount}`;
+  const frame = ctx.getImageData(roi.x, roi.y, roi.width, roi.height);
+  const rawCount = countDots(frame);
+
+  // very light smoothing so it responds fast inside 15 seconds
+  displayedCount = Math.abs(rawCount - displayedCount) >= 2
+    ? rawCount
+    : Math.round((displayedCount + rawCount) / 2);
+
+  document.getElementById("count").innerText = `Count: ${displayedCount}`;
+  drawOverlay(octx, roi);
 }
 
-function smoothCount(value) {
-  smoothedCounts.push(value);
-  if (smoothedCounts.length > 7) smoothedCounts.shift();
+function drawOverlay(octx, roi) {
+  const w = overlay.width;
+  const h = overlay.height;
+  octx.clearRect(0, 0, w, h);
 
-  const sorted = [...smoothedCounts].sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)];
+  octx.strokeStyle = frozen ? "#22c55e" : "rgba(255,255,255,0.95)";
+  octx.lineWidth = 4;
+  octx.strokeRect(roi.x, roi.y, roi.width, roi.height);
 
-  // ease the displayed number so it doesn't jump around
-  if (Math.abs(median - displayedCount) >= 2) {
-    displayedCount = median;
-  } else {
-    displayedCount = Math.round((displayedCount * 3 + median) / 4);
-  }
-
-  return displayedCount;
+  octx.fillStyle = "rgba(0,0,0,0.55)";
+  octx.fillRect(20, 20, 220, 70);
+  octx.fillStyle = "white";
+  octx.font = "bold 34px Arial";
+  octx.fillText(displayedCount, 35, 65);
 }
 
-function countDotsFromSingleFrame(imageData) {
+function countDots(imageData) {
   const { data, width, height } = imageData;
   const smallW = Math.floor(width / STEP);
   const smallH = Math.floor(height / STEP);
   const gray = new Uint8ClampedArray(smallW * smallH);
 
-  // grayscale + rough brightness stats
   let sum = 0;
   for (let y = 0; y < smallH; y++) {
     for (let x = 0; x < smallW; x++) {
@@ -139,15 +162,13 @@ function countDotsFromSingleFrame(imageData) {
   }
 
   const avg = sum / gray.length;
+  const threshold = Math.min(250, avg + BRIGHT_OFFSET);
   const binary = new Uint8Array(gray.length);
 
-  // assume dots are brighter than background on a screen
-  const threshold = Math.min(245, avg + DIFF_THRESHOLD);
   for (let i = 0; i < gray.length; i++) {
     binary[i] = gray[i] >= threshold ? 1 : 0;
   }
 
-  // denoise with simple neighborhood majority
   const clean = new Uint8Array(binary.length);
   for (let y = 1; y < smallH - 1; y++) {
     for (let x = 1; x < smallW - 1; x++) {
@@ -204,8 +225,8 @@ function countDotsFromSingleFrame(imageData) {
       if (
         scaledArea >= MIN_AREA &&
         scaledArea <= MAX_AREA &&
-        aspect > 0.4 &&
-        aspect < 2.5
+        aspect > 0.45 &&
+        aspect < 2.2
       ) {
         blobs++;
       }
